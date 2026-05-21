@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0e0e0e; touch-action: none; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    let w, h, playerY, vy = 0, obstacles = [], frame = 0;
+    function resize() {
+      w = canvas.width = window.innerWidth;
+      h = canvas.height = window.innerHeight;
+      playerY = h * 0.5;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+    function tap() { vy = -14; }
+    canvas.addEventListener('pointerdown', tap);
+    function loop() {
+      frame++;
+      vy += 0.6;
+      playerY += vy;
+      if (playerY > h - 30) { playerY = h - 30; vy = 0; }
+      if (playerY < 30) { playerY = 30; vy = 0; }
+      if (frame % 60 === 0) obstacles.push({ x: w + 40, gap: 80 + Math.random() * 120, size: 50 + Math.random() * 40 });
+      ctx.fillStyle = '#0e0e0e';
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 20px system-ui';
+      ctx.fillText('벽 피하기 — 탭해서 점프', 16, 36);
+      ctx.fillStyle = '#4af';
+      ctx.fillRect(40, playerY - 15, 30, 30);
+      obstacles.forEach((o, i) => {
+        o.x -= 5;
+        ctx.fillStyle = '#f44';
+        ctx.fillRect(o.x, 0, 40, o.gap - o.size / 2);
+        ctx.fillRect(o.x, o.gap + o.size / 2, 40, h);
+        if (o.x < 80 && o.x > 20 && (playerY < o.gap - o.size / 2 || playerY > o.gap + o.size / 2)) {
+          ctx.fillStyle = '#fff';
+          ctx.fillText('GAME OVER — 탭 재시작', w / 2 - 100, h / 2);
+          obstacles.length = 0;
+          frame = 0;
+          playerY = h / 2;
+        }
+        if (o.x < -50) obstacles.splice(i, 1);
+      });
+      requestAnimationFrame(loop);
+    }
+    loop();
+  </script>
+</body>
+</html>
