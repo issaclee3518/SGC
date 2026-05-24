@@ -7,6 +7,7 @@ import {
   type PipelineStep,
 } from '../lib/pipeline';
 import { PipelinePanel } from './PipelinePanel';
+import { GameLikeButton } from './GameLikeButton';
 
 export type Game = {
   id: string;
@@ -14,12 +15,16 @@ export type Game = {
   description?: string;
   playUrl: string;
   storageBaseUrl: string;
+  likeCount?: number;
+  likedByMe?: boolean;
 };
 
 type GameCardProps = {
   game: Game;
   height: number;
   showPipeline?: boolean;
+  onToggleLike?: (gameId: string) => void;
+  likeBusy?: boolean;
 };
 
 function isHtmlDocument(content: string): boolean {
@@ -52,6 +57,8 @@ export function GameCard({
   game,
   height,
   showPipeline = true,
+  onToggleLike,
+  likeBusy = false,
 }: GameCardProps) {
   const [html, setHtml] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -257,6 +264,17 @@ export function GameCard({
             </Text>
           </View>
         )}
+
+        {onToggleLike ? (
+          <View style={styles.likeAnchor} pointerEvents="box-none">
+            <GameLikeButton
+              likeCount={game.likeCount ?? 0}
+              likedByMe={game.likedByMe ?? false}
+              disabled={likeBusy}
+              onPress={() => onToggleLike(game.id)}
+            />
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -303,5 +321,11 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.55)',
     fontSize: 13,
     textAlign: 'center',
+  },
+  likeAnchor: {
+    position: 'absolute',
+    right: 16,
+    bottom: 16,
+    zIndex: 10,
   },
 });

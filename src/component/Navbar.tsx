@@ -1,12 +1,13 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-export type NavbarTab = 'games' | 'create';
+export type NavbarTab = 'games' | 'create' | 'profile';
 
 type NavbarProps = {
   active?: NavbarTab;
   onPressGames?: () => void;
   onPressCreate?: () => void;
+  onPressProfile?: () => void;
 };
 
 function TabButton({
@@ -40,6 +41,7 @@ export function Navbar({
   active = 'games',
   onPressGames,
   onPressCreate,
+  onPressProfile,
 }: NavbarProps) {
   return (
     <View style={styles.root}>
@@ -53,6 +55,11 @@ export function Navbar({
         isActive={active === 'create'}
         onPress={onPressCreate}
       />
+      <TabButton
+        label="Profile"
+        isActive={active === 'profile'}
+        onPress={onPressProfile}
+      />
     </View>
   );
 }
@@ -61,7 +68,6 @@ const styles = StyleSheet.create({
   root: {
     flexDirection: 'row',
     alignItems: 'stretch',
-    justifyContent: 'space-around',
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: 'rgba(255,255,255,0.18)',
     backgroundColor: '#121212',

@@ -3,6 +3,7 @@
     "name": "SG",
     "slug": "SG",
     "version": "1.0.0",
+    "scheme": "scrollgame",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -30,6 +31,9 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-web-browser"
+    ]
   }
 }

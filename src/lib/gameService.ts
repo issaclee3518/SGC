@@ -1,5 +1,6 @@
 import type { Game } from '../component/GameCard';
-import { supabase } from './supabaseClient';
+import { fetchLikeMetaForGames } from './likeService';
+import { supabase } from './supabase';
 
 const GAMES_BUCKET = 'games';
 
@@ -7,6 +8,7 @@ type GameRow = {
   id: number;
   name: string;
   storage_path: string | null;
+  user_id: string | null;
 };
 
 export function getGamePublicUrl(storagePath: string): string {
@@ -14,24 +16,9 @@ export function getGamePublicUrl(storagePath: string): string {
   return data.publicUrl;
 }
 
-/** Supabase에서 게임 목록 직접 조회 (SGS 경유 없음) */
-export async function fetchGames(): Promise<Game[]> {
-  const { data, error } = await supabase
-    .from('games')
-    .select('id, name, storage_path')
-    .order('id', { ascending: true });
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  if (!data?.length) {
-    return [];
-  }
-
+function mapRows(rows: GameRow[]): Game[] {
   const storageBaseUrl = getGamesStorageBaseUrl();
-
-  return (data as GameRow[])
+  return rows
     .filter(
       (row) =>
         row.storage_path && row.storage_path.toLowerCase().endsWith('.html'),
@@ -42,6 +29,45 @@ export async function fetchGames(): Promise<Game[]> {
       playUrl: getGamePublicUrl(row.storage_path!),
       storageBaseUrl,
     }));
+}
+
+async function attachLikes(games: Game[], userId: string): Promise<Game[]> {
+  const ids = games.map((g) => Number(g.id)).filter((n) => !Number.isNaN(n));
+  const meta = await fetchLikeMetaForGames(ids, userId);
+  return games.map((g) => {
+    const m = meta.get(Number(g.id));
+    return {
+      ...g,
+      likeCount: m?.likeCount ?? 0,
+      likedByMe: m?.likedByMe ?? false,
+    };
+  });
+}
+
+/** 피드 — 로그인한 사용자가 볼 수 있는 전체 게임 + 좋아요 */
+export async function fetchGames(userId: string): Promise<Game[]> {
+  const { data, error } = await supabase
+    .from('games')
+    .select('id, name, storage_path, user_id')
+    .order('id', { ascending: false });
+
+  if (error) throw new Error(error.message);
+  if (!data?.length) return [];
+  const games = mapRows(data as GameRow[]);
+  return attachLikes(games, userId);
+}
+
+/** 프로필 — 내가 만든 게임만 */
+export async function fetchMyGames(userId: string): Promise<Game[]> {
+  const { data, error } = await supabase
+    .from('games')
+    .select('id, name, storage_path, user_id')
+    .eq('user_id', userId)
+    .order('id', { ascending: false });
+
+  if (error) throw new Error(error.message);
+  if (!data?.length) return [];
+  return mapRows(data as GameRow[]);
 }
 
 function getGamesStorageBaseUrl(): string {

@@ -63,15 +63,23 @@ async function parseJsonResponse<T>(
 async function postJson<T>(
   path: string,
   body: Record<string, unknown>,
+  accessToken?: string,
 ): Promise<T & { pipeline?: PipelineTraceRecord[] }> {
   const apiBase = getApiBase();
   const url = `${apiBase}${path}`;
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  }
 
   let res: Response;
   try {
     res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
     });
   } catch {
@@ -154,12 +162,18 @@ export async function reviseGamePreview(params: {
   return postJson<GamePreview>('/api/games/revise', params);
 }
 
-/** 완성 → Supabase 저장 */
+/** 완성 → Supabase 저장 (로그인 access token 필요) */
 export async function publishGame(params: {
   html: string;
   name: string;
+  accessToken: string;
 }): Promise<PublishGameResult> {
-  return postJson<PublishGameResult>('/api/games/publish', params);
+  const { accessToken, ...body } = params;
+  return postJson<PublishGameResult>(
+    '/api/games/publish',
+    body,
+    accessToken,
+  );
 }
 
 export { getApiBase };

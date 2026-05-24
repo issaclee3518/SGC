@@ -33,16 +33,13 @@ import {
   type PipelineStep,
 } from '../lib/pipeline';
 import { getReviseSource } from '../lib/reviseSource';
+import { useAuth } from '../context/AuthContext';
 
 const MAX_CHAT_LENGTH = 500;
 const WINDOW_HEIGHT = Dimensions.get('window').height;
 /** 스크롤 위 미리보기 WebView 높이 (아래로 내리면 진단 패널) */
 const PREVIEW_VIEWPORT_HEIGHT = Math.round(
   Math.min(520, Math.max(320, WINDOW_HEIGHT * 0.58)),
-);
-/** 기획 채팅 영역 높이 */
-const CHAT_BOX_HEIGHT = Math.round(
-  Math.min(580, Math.max(440, WINDOW_HEIGHT * 0.62)),
 );
 
 type CreatScreenProps = {
@@ -98,6 +95,7 @@ function initCreatePipeline(healthOk: boolean | null): PipelineStep[] {
  * 생성 → 미리보기(진단) → 수정 → 완성(Supabase)
  */
 export function CreatScreen({ onGameCreated }: CreatScreenProps) {
+  const { session: authSession } = useAuth();
   const [sessionId, setSessionId] = React.useState<string | null>(null);
   const [chatMessages, setChatMessages] = React.useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = React.useState('');
@@ -318,75 +316,71 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
       keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
     >
       {!draft ? (
-        <ScrollView
-          style={styles.scroll}
-          contentContainerStyle={styles.scrollContent}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          <Text style={styles.title}>AI 게임 제작</Text>
-          <Text style={styles.subtitle}>
-            기획 AI와 대화로 게임을 구체화한 뒤, 만들기를 누르면 코딩이 시작됩니다.
-          </Text>
+        <View style={styles.chatMode}>
+          <View style={styles.chatHeader}>
+            <Text style={styles.title}>AI 게임 제작</Text>
+            <Text style={styles.subtitle}>
+              기획 AI와 대화로 게임을 구체화한 뒤, 만들기를 누르면 코딩이 시작됩니다.
+            </Text>
+            {readyToBuild ? (
+              <View style={styles.readyBanner}>
+                <Text style={styles.readyBannerText}>
+                  ✅ 기획이 정리됐어요. 아래 「게임 만들기」를 눌러 주세요.
+                </Text>
+              </View>
+            ) : null}
+          </View>
 
-          {readyToBuild ? (
-            <View style={styles.readyBanner}>
-              <Text style={styles.readyBannerText}>
-                ✅ 기획이 정리됐어요. 아래 「게임 만들기」를 눌러 주세요.
-              </Text>
-            </View>
-          ) : null}
-
-          <View style={[styles.chatBox, { height: CHAT_BOX_HEIGHT }]}>
-            <ScrollView
-              ref={chatScrollRef}
-              style={styles.chatScroll}
-              contentContainerStyle={styles.chatScrollContent}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-            >
-              {chatMessages.map((msg, i) => (
+          <ScrollView
+            ref={chatScrollRef}
+            style={styles.chatScroll}
+            contentContainerStyle={styles.chatScrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {chatMessages.map((msg, i) => (
+              <View
+                key={`${msg.role}-${i}`}
+                style={[
+                  styles.chatBubbleWrap,
+                  msg.role === 'user'
+                    ? styles.chatBubbleWrapUser
+                    : styles.chatBubbleWrapAssistant,
+                ]}
+              >
+                <Text style={styles.chatRoleLabel}>
+                  {msg.role === 'user' ? '나' : '기획 AI'}
+                </Text>
                 <View
-                  key={`${msg.role}-${i}`}
                   style={[
-                    styles.chatBubbleWrap,
+                    styles.chatBubble,
                     msg.role === 'user'
-                      ? styles.chatBubbleWrapUser
-                      : styles.chatBubbleWrapAssistant,
+                      ? styles.chatBubbleUser
+                      : styles.chatBubbleAssistant,
                   ]}
                 >
-                  <Text style={styles.chatRoleLabel}>
-                    {msg.role === 'user' ? '나' : '기획 AI'}
-                  </Text>
-                  <View
+                  <Text
                     style={[
-                      styles.chatBubble,
-                      msg.role === 'user'
-                        ? styles.chatBubbleUser
-                        : styles.chatBubbleAssistant,
+                      styles.chatBubbleText,
+                      msg.role === 'user' && styles.chatBubbleTextUser,
                     ]}
                   >
-                    <Text
-                      style={[
-                        styles.chatBubbleText,
-                        msg.role === 'user' && styles.chatBubbleTextUser,
-                      ]}
-                    >
-                      {msg.content}
-                    </Text>
-                  </View>
+                    {msg.content}
+                  </Text>
                 </View>
-              ))}
-              {chatBusy ? (
-                <View style={styles.chatBubbleWrapAssistant}>
-                  <Text style={styles.chatRoleLabel}>기획 AI</Text>
-                  <View style={[styles.chatBubble, styles.chatBubbleAssistant]}>
-                    <ActivityIndicator color="rgba(255,255,255,0.7)" size="small" />
-                  </View>
+              </View>
+            ))}
+            {chatBusy ? (
+              <View style={styles.chatBubbleWrapAssistant}>
+                <Text style={styles.chatRoleLabel}>기획 AI</Text>
+                <View style={[styles.chatBubble, styles.chatBubbleAssistant]}>
+                  <ActivityIndicator color="rgba(255,255,255,0.7)" size="small" />
                 </View>
-              ) : null}
-            </ScrollView>
+              </View>
+            ) : null}
+          </ScrollView>
 
+          <View style={styles.chatFooter}>
             <View style={styles.chatInputRow}>
               <TextInput
                 style={styles.chatInput}
@@ -410,79 +404,81 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
                 <Text style={styles.chatSendBtnText}>전송</Text>
               </Pressable>
             </View>
-          </View>
 
-          <PipelinePanel
-            title="파이프라인 진단 (제작)"
-            steps={pipelineSteps}
-          />
-
-          {__DEV__ ? (
-            <Text
-              style={[
-                styles.apiHint,
-                apiOk === false && styles.apiHintError,
-                apiOk === true && styles.apiHintOk,
+            <Pressable
+              style={({ pressed }) => [
+                styles.primaryBtn,
+                styles.chatBuildBtn,
+                !canBuild && styles.btnDisabled,
+                pressed && canBuild && styles.btnPressed,
               ]}
-            >
-              API: {apiBase}
-              {apiOk === null
-                ? ' (연결 확인 중…)'
-                : apiOk
-                  ? ' · 서버 연결됨'
-                  : ' · 서버 없음'}
-            </Text>
-          ) : null}
-
-          <Pressable
-            style={({ pressed }) => [
-              styles.primaryBtn,
-              !canBuild && styles.btnDisabled,
-              pressed && canBuild && styles.btnPressed,
-            ]}
-            disabled={!canBuild}
-            onPress={async () => {
-              if (!sessionId) return;
-              setBusy('generate');
-              setPlanningSummary(getPlanningSummary(chatMessages));
-              setPipeline((prev) =>
-                upsertStep(prev, {
-                  id: 'client_request',
-                  label: '1. API 요청 (생성)',
-                  status: 'running',
-                  layer: 'client',
-                }),
-              );
-              resetPreviewPipeline();
-              try {
-                const preview = await generateGamePreview(undefined, sessionId);
-                applyServerPipeline(preview.pipeline, '생성');
-                setDraft(preview);
-                setPreviewKey((k) => k + 1);
-                setShowRevision(false);
-                setRevisionPrompt('');
-              } catch (e) {
-                const err = e instanceof ApiPipelineError ? e : null;
-                failPipeline(
-                  '생성',
-                  e instanceof Error ? e.message : '생성 실패',
-                  err?.pipeline,
+              disabled={!canBuild}
+              onPress={async () => {
+                if (!sessionId) return;
+                setBusy('generate');
+                setPlanningSummary(getPlanningSummary(chatMessages));
+                setPipeline((prev) =>
+                  upsertStep(prev, {
+                    id: 'client_request',
+                    label: '1. API 요청 (생성)',
+                    status: 'running',
+                    layer: 'client',
+                  }),
                 );
-                Alert.alert('오류', e instanceof Error ? e.message : '생성 실패');
-              } finally {
-                setBusy(null);
-              }
-            }}
-          >
-            {busy === 'generate' ? (
-              <ActivityIndicator color="#0E0E0E" />
-            ) : (
-              <Text style={styles.primaryBtnText}>
-                {readyToBuild ? '게임 만들기' : '게임 만들기 (기획 중…)'}
-              </Text>
-            )}
-          </Pressable>
-        </ScrollView>
+                resetPreviewPipeline();
+                try {
+                  const preview = await generateGamePreview(undefined, sessionId);
+                  applyServerPipeline(preview.pipeline, '생성');
+                  setDraft(preview);
+                  setPreviewKey((k) => k + 1);
+                  setShowRevision(false);
+                  setRevisionPrompt('');
+                } catch (e) {
+                  const err = e instanceof ApiPipelineError ? e : null;
+                  failPipeline(
+                    '생성',
+                    e instanceof Error ? e.message : '생성 실패',
+                    err?.pipeline,
+                  );
+                  Alert.alert('오류', e instanceof Error ? e.message : '생성 실패');
+                } finally {
+                  setBusy(null);
+                }
+              }}
+            >
+              {busy === 'generate' ? (
+                <ActivityIndicator color="#0E0E0E" />
+              ) : (
+                <Text style={styles.primaryBtnText}>
+                  {readyToBuild ? '게임 만들기' : '게임 만들기 (기획 중…)'}
+                </Text>
+              )}
+            </Pressable>
+
+            {__DEV__ ? (
+              <>
+                <Text
+                  style={[
+                    styles.apiHint,
+                    apiOk === false && styles.apiHintError,
+                    apiOk === true && styles.apiHintOk,
+                  ]}
+                >
+                  API: {apiBase}
+                  {apiOk === null
+                    ? ' (연결 확인 중…)'
+                    : apiOk
+                      ? ' · 서버 연결됨'
+                      : ' · 서버 없음'}
+                </Text>
+                <PipelinePanel
+                  title="파이프라인 진단 (제작)"
+                  steps={pipelineSteps}
+                />
+              </>
+            ) : null}
+          </View>
+        </View>
       ) : (
         <View style={styles.previewMode}>
           <View style={styles.previewToolbar}>
@@ -525,9 +521,13 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
                     }),
                   );
                   try {
+                    if (!authSession?.access_token) {
+                      throw new ApiPipelineError('로그인이 필요합니다.');
+                    }
                     const result = await publishGame({
                       html: draft.html,
                       name: draft.name,
+                      accessToken: authSession.access_token,
                     });
                     setPipeline((prev) =>
                       mergeServerPipeline(
@@ -692,6 +692,25 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#0E0E0E' },
+  chatMode: {
+    flex: 1,
+    backgroundColor: '#0E0E0E',
+  },
+  chatHeader: {
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 8,
+  },
+  chatFooter: {
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: Platform.OS === 'ios' ? 12 : 16,
+    backgroundColor: '#0E0E0E',
+    gap: 10,
+  },
+  chatBuildBtn: {
+    marginTop: 0,
+  },
   scroll: { flex: 1 },
   scrollContent: {
     paddingHorizontal: 20,
@@ -708,7 +727,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: 'rgba(255,255,255,0.65)',
     lineHeight: 20,
-    marginBottom: 12,
+    marginBottom: 4,
   },
   readyBanner: {
     backgroundColor: 'rgba(120,220,160,0.12)',
@@ -717,26 +736,21 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
-    marginBottom: 12,
+    marginTop: 8,
   },
   readyBannerText: {
     fontSize: 13,
     color: 'rgba(160,240,190,0.95)',
     lineHeight: 18,
   },
-  chatBox: {
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.04)',
-    marginBottom: 16,
-    overflow: 'hidden',
-  },
   chatScroll: {
     flex: 1,
+    backgroundColor: '#0E0E0E',
   },
   chatScrollContent: {
-    padding: 12,
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 16,
     gap: 10,
   },
   chatBubbleWrap: {
@@ -765,9 +779,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.92)',
   },
   chatBubbleAssistant: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
   },
   chatBubbleText: {
     fontSize: 14,
@@ -781,27 +793,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 8,
-    padding: 10,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.1)',
   },
   chatInput: {
     flex: 1,
-    minHeight: 40,
-    maxHeight: 88,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.18)',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 14,
+    minHeight: 44,
+    maxHeight: 100,
+    borderWidth: 0,
+    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    fontSize: 15,
     color: '#FFFFFF',
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
   chatSendBtn: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 22,
     backgroundColor: '#FFFFFF',
   },
   chatSendBtnText: {
@@ -810,9 +818,9 @@ const styles = StyleSheet.create({
     color: '#0E0E0E',
   },
   apiHint: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.45)',
-    marginBottom: 16,
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.35)',
+    marginTop: 4,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   apiHintOk: { color: 'rgba(120,220,160,0.9)' },

@@ -11,9 +11,15 @@ import { GameCard, type Game } from '../component/GameCard';
 
 type FeedScreenProps = {
   games: Game[];
+  onToggleLike?: (gameId: string) => void;
+  likeBusyGameId?: string | null;
 };
 
-export function FeedScreen({ games }: FeedScreenProps) {
+export function FeedScreen({
+  games,
+  onToggleLike,
+  likeBusyGameId,
+}: FeedScreenProps) {
   const { height } = useWindowDimensions();
   const [pageHeight, setPageHeight] = React.useState<number>(0);
 
@@ -41,7 +47,12 @@ export function FeedScreen({ games }: FeedScreenProps) {
         data={games}
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => (
-          <GameCard game={item} height={effectiveHeight} />
+          <GameCard
+            game={item}
+            height={effectiveHeight}
+            onToggleLike={onToggleLike}
+            likeBusy={likeBusyGameId === item.id}
+          />
         )}
         pagingEnabled
         decelerationRate="fast"
