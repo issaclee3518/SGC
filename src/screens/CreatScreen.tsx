@@ -1,8 +1,11 @@
 import React from 'react';
+import * as ImagePicker from 'expo-image-picker';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   Dimensions,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -12,17 +15,21 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { ChatPromptComposer } from '../component/ChatPromptComposer';
+import { GameBuildLoader } from '../component/GameBuildLoader';
 import { GamePreviewWebView } from '../component/GamePreviewWebView';
 import { PipelinePanel } from '../component/PipelinePanel';
 import {
   ApiPipelineError,
   checkApiHealth,
   createChatSession,
+  deleteChatSession,
   generateGamePreview,
   getApiBase,
   publishGame,
   reviseGamePreview,
-  sendChatMessage,
+  isChatSessionNotFoundError,
+  sendChatMessageResilient,
   type ChatMessage,
   type GamePreview,
 } from '../lib/aiService';
@@ -33,13 +40,14 @@ import {
   type PipelineStep,
 } from '../lib/pipeline';
 import { getReviseSource } from '../lib/reviseSource';
+import { uploadPendingGameIcon } from '../lib/gameIconService';
 import { useAuth } from '../context/AuthContext';
 
 const MAX_CHAT_LENGTH = 500;
 const WINDOW_HEIGHT = Dimensions.get('window').height;
 /** 스크롤 위 미리보기 WebView 높이 (아래로 내리면 진단 패널) */
 const PREVIEW_VIEWPORT_HEIGHT = Math.round(
-  Math.min(520, Math.max(320, WINDOW_HEIGHT * 0.58)),
+  Math.min(580, Math.max(320, WINDOW_HEIGHT * 0.7)),
 );
 
 type CreatScreenProps = {
@@ -65,8 +73,23 @@ function getPlanningSummary(messages: ChatMessage[]): string {
     .join(' / ');
 }
 
-function hasUserMessage(messages: ChatMessage[]): boolean {
-  return messages.some((m) => m.role === 'user');
+function isPlanningComplete(messages: ChatMessage[]): boolean {
+  return messages.some(
+    (m) =>
+      m.role === 'assistant' &&
+      (m.content.includes('✅ 기획 요약:') || m.content.includes('기획 요약:')),
+  );
+}
+
+/** 수정 응답에 assetBuildId가 없으면 기존 미리보기 에셋 경로 유지 */
+function mergePreviewDraft(
+  prev: GamePreview | null,
+  next: GamePreview,
+): GamePreview {
+  return {
+    ...next,
+    assetBuildId: next.assetBuildId ?? prev?.assetBuildId,
+  };
 }
 
 function initCreatePipeline(healthOk: boolean | null): PipelineStep[] {
@@ -102,6 +125,13 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
   const [chatBusy, setChatBusy] = React.useState(false);
   const [readyToBuild, setReadyToBuild] = React.useState(false);
   const [planningSummary, setPlanningSummary] = React.useState('');
+  const [pendingIconStoragePath, setPendingIconStoragePath] = React.useState<
+    string | null
+  >(null);
+  const [pendingIconPreviewUri, setPendingIconPreviewUri] = React.useState<
+    string | null
+  >(null);
+  const [iconAttachBusy, setIconAttachBusy] = React.useState(false);
   const chatScrollRef = React.useRef<ScrollView>(null);
   const [revisionPrompt, setRevisionPrompt] = React.useState('');
   const [draft, setDraft] = React.useState<GamePreview | null>(null);
@@ -114,7 +144,32 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
     initCreatePipeline(null),
   );
   const [previewKey, setPreviewKey] = React.useState(0);
+  const [buildLoaderVisible, setBuildLoaderVisible] = React.useState(false);
+  const buildLoaderOpacity = React.useRef(new Animated.Value(0)).current;
   const apiBase = getApiBase();
+
+  const showBuildLoader = React.useCallback(() => {
+    setBuildLoaderVisible(true);
+    buildLoaderOpacity.setValue(0);
+    Animated.timing(buildLoaderOpacity, {
+      toValue: 1,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  }, [buildLoaderOpacity]);
+
+  const hideBuildLoader = React.useCallback(() => {
+    return new Promise<void>((resolve) => {
+      Animated.timing(buildLoaderOpacity, {
+        toValue: 0,
+        duration: 550,
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (finished) setBuildLoaderVisible(false);
+        resolve();
+      });
+    });
+  }, [buildLoaderOpacity]);
 
   const setPipeline = React.useCallback(
     (updater: (prev: PipelineStep[]) => PipelineStep[]) => {
@@ -134,6 +189,15 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
     return () => {
       cancelled = true;
     };
+  }, [apiBase]);
+
+  /** Render 재시작·로컬↔배포 URL 변경 시 서버 메모리 세션과 불일치 → 새 세션 필요 */
+  React.useEffect(() => {
+    setSessionId(null);
+    setChatMessages([]);
+    setReadyToBuild(false);
+    setPlanningSummary('');
+    setChatBusy(false);
   }, [apiBase]);
 
   React.useEffect(() => {
@@ -209,11 +273,233 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
     [setPipeline],
   );
 
+  const runGenerateGame = React.useCallback(async () => {
+    if (!sessionId) return;
+    setBusy('generate');
+    showBuildLoader();
+    setPlanningSummary(getPlanningSummary(chatMessages));
+    setPipeline((prev) =>
+      upsertStep(prev, {
+        id: 'client_request',
+        label: '1. API 요청 (생성)',
+        status: 'running',
+        layer: 'client',
+      }),
+    );
+    resetPreviewPipeline();
+    try {
+      const localPlan =
+        planningSummary || getPlanningSummary(chatMessages);
+      let preview: GamePreview;
+      try {
+        preview = await generateGamePreview(undefined, sessionId);
+      } catch (e) {
+        if (isChatSessionNotFoundError(e) && localPlan.trim()) {
+          preview = await generateGamePreview(localPlan, undefined);
+        } else {
+          throw e;
+        }
+      }
+      applyServerPipeline(preview.pipeline, '생성');
+      setDraft(preview);
+      setPreviewKey((k) => k + 1);
+      setShowRevision(false);
+      setRevisionPrompt('');
+      await hideBuildLoader();
+    } catch (e) {
+      await hideBuildLoader();
+      const err = e instanceof ApiPipelineError ? e : null;
+      failPipeline(
+        '생성',
+        e instanceof Error ? e.message : '생성 실패',
+        err?.pipeline,
+      );
+      Alert.alert('오류', e instanceof Error ? e.message : '생성 실패');
+    } finally {
+      setBusy(null);
+    }
+  }, [
+    sessionId,
+    chatMessages,
+    showBuildLoader,
+    hideBuildLoader,
+    setPipeline,
+    resetPreviewPipeline,
+    applyServerPipeline,
+    failPipeline,
+  ]);
+
   const isBusy = busy !== null || chatBusy;
-  const previewLoading = busy === 'generate' || busy === 'revise';
+  const iconUploadPending =
+    !!pendingIconPreviewUri &&
+    (iconAttachBusy || !pendingIconStoragePath);
+  const previewLoading = busy === 'revise';
   const canSendChat = chatInput.trim().length > 0 && !chatBusy && !!sessionId;
-  const canBuild =
-    !!sessionId && hasUserMessage(chatMessages) && !isBusy;
+  const planningComplete =
+    readyToBuild || isPlanningComplete(chatMessages);
+  const canBuild = !!sessionId && planningComplete && !isBusy;
+
+  const resetChatForNewGame = React.useCallback(async () => {
+    const oldSessionId = sessionId;
+    if (oldSessionId) {
+      try {
+        await deleteChatSession(oldSessionId);
+      } catch (e) {
+        Alert.alert(
+          '오류',
+          e instanceof Error ? e.message : '대화 삭제에 실패했습니다.',
+        );
+        return;
+      }
+    }
+    setDraft(null);
+    setShowRevision(false);
+    setRevisionPrompt('');
+    setPreviewKey((k) => k + 1);
+    setChatInput('');
+    setChatBusy(false);
+    setReadyToBuild(false);
+    setPlanningSummary('');
+    setSessionId(null);
+    setChatMessages([]);
+    setPendingIconStoragePath(null);
+    setPendingIconPreviewUri(null);
+    setIconAttachBusy(false);
+    setPipelineSteps(initCreatePipeline(apiOk));
+  }, [apiOk, sessionId]);
+
+  const handlePickGameIcon = React.useCallback(async () => {
+    const userId = authSession?.user?.id;
+    if (!userId || iconAttachBusy || isBusy) return;
+
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('권한 필요', '갤러리에서 썸네일을 선택하려면 사진 접근 권한이 필요합니다.');
+      return;
+    }
+
+    const picked = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.85,
+    });
+    if (picked.canceled || !picked.assets[0]?.uri) return;
+
+    const uri = picked.assets[0].uri;
+    setPendingIconPreviewUri(uri);
+    setIconAttachBusy(true);
+    try {
+      const path = await uploadPendingGameIcon(userId, uri);
+      setPendingIconStoragePath(path);
+    } catch (e) {
+      setPendingIconPreviewUri(null);
+      setPendingIconStoragePath(null);
+      Alert.alert(
+        '업로드 실패',
+        e instanceof Error ? e.message : '썸네일 업로드에 실패했습니다.',
+      );
+    } finally {
+      setIconAttachBusy(false);
+    }
+  }, [authSession?.user?.id, iconAttachBusy, isBusy]);
+
+  const handleResetChat = React.useCallback(() => {
+    if (isBusy) return;
+    Alert.alert(
+      '대화 초기화',
+      '지금까지의 대화를 삭제하고 새로 시작할까요? 이전 기록은 저장되지 않습니다.',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '초기화',
+          style: 'destructive',
+          onPress: () => void resetChatForNewGame(),
+        },
+      ],
+    );
+  }, [isBusy, resetChatForNewGame]);
+
+  const handleDeleteDraft = React.useCallback(() => {
+    if (!draft || isBusy) return;
+    Alert.alert(
+      '게임 삭제',
+      '이 미리보기를 삭제하고 새 기획 채팅을 시작할까요?',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '삭제',
+          style: 'destructive',
+          onPress: () => void resetChatForNewGame(),
+        },
+      ],
+    );
+  }, [draft, isBusy, resetChatForNewGame]);
+
+  const handlePublish = React.useCallback(async () => {
+    if (!draft) return;
+    setBusy('publish');
+    setPipeline((prev) =>
+      upsertStep(prev, {
+        id: 'client_request',
+        label: '1. API 요청 (완성)',
+        status: 'running',
+        layer: 'client',
+      }),
+    );
+    try {
+      if (!authSession?.access_token) {
+        throw new ApiPipelineError('로그인이 필요합니다.');
+      }
+      const result = await publishGame({
+        html: draft.html,
+        name: draft.name,
+        accessToken: authSession.access_token,
+        iconStoragePath: pendingIconStoragePath ?? undefined,
+        assetBuildId: draft.assetBuildId,
+      });
+      setPipeline((prev) =>
+        mergeServerPipeline(
+          upsertStep(prev, {
+            id: 'client_request',
+            label: '1. API 요청 (완성)',
+            status: 'ok',
+            layer: 'client',
+          }),
+          result.pipeline,
+        ),
+      );
+      setDraft(null);
+      setSessionId(null);
+      setChatMessages([]);
+      setChatInput('');
+      setReadyToBuild(false);
+      setPlanningSummary('');
+      setRevisionPrompt('');
+      setShowRevision(false);
+      setPendingIconStoragePath(null);
+      setPendingIconPreviewUri(null);
+      onGameCreated?.();
+      Alert.alert('완료', `저장됨 (id ${result.id}). Games 탭에서 확인하세요.`);
+    } catch (e) {
+      const err = e instanceof ApiPipelineError ? e : null;
+      failPipeline(
+        '완성',
+        e instanceof Error ? e.message : '저장 실패',
+        err?.pipeline,
+      );
+      Alert.alert('오류', e instanceof Error ? e.message : '저장 실패');
+    } finally {
+      setBusy(null);
+    }
+  }, [
+    authSession?.access_token,
+    draft,
+    failPipeline,
+    onGameCreated,
+    pendingIconStoragePath,
+    setPipeline,
+  ]);
 
   const handleSendChat = React.useCallback(async () => {
     const text = chatInput.trim();
@@ -224,11 +510,22 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
     setChatMessages((prev) => [...prev, { role: 'user', content: text }]);
 
     try {
-      const result = await sendChatMessage(sessionId, text);
+      const result = await sendChatMessageResilient(sessionId, text, {
+        hasGameThumbnail: !!pendingIconStoragePath,
+      });
+      if (result.sessionId !== sessionId) {
+        setSessionId(result.sessionId);
+      }
       setChatMessages(result.messages);
       setReadyToBuild(result.readyToBuild);
       if (result.readyToBuild) {
         setPlanningSummary(getPlanningSummary(result.messages));
+      }
+      if (result.sessionRecreated) {
+        Alert.alert(
+          '새 대화로 이어갑니다',
+          '서버가 재시작되었거나 이전 대화가 만료되어 새 세션을 열었습니다. 방금 보낸 메시지부터 다시 기획해요.',
+        );
       }
     } catch (e) {
       setChatMessages((prev) => prev.slice(0, -1));
@@ -237,7 +534,7 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
     } finally {
       setChatBusy(false);
     }
-  }, [chatInput, sessionId, chatBusy]);
+  }, [chatInput, sessionId, chatBusy, pendingIconStoragePath]);
 
   const previewHandlers = {
     onLoadStart: () => {
@@ -322,7 +619,7 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
             <Text style={styles.subtitle}>
               기획 AI와 대화로 게임을 구체화한 뒤, 만들기를 누르면 코딩이 시작됩니다.
             </Text>
-            {readyToBuild ? (
+            {planningComplete ? (
               <View style={styles.readyBanner}>
                 <Text style={styles.readyBannerText}>
                   ✅ 기획이 정리됐어요. 아래 「게임 만들기」를 눌러 주세요.
@@ -381,79 +678,72 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
           </ScrollView>
 
           <View style={styles.chatFooter}>
-            <View style={styles.chatInputRow}>
-              <TextInput
-                style={styles.chatInput}
-                value={chatInput}
-                onChangeText={setChatInput}
-                placeholder="메시지 입력…"
-                placeholderTextColor="rgba(255,255,255,0.35)"
-                multiline
-                maxLength={MAX_CHAT_LENGTH}
-                editable={!chatBusy && !!sessionId}
-              />
+            {pendingIconPreviewUri ? (
+              <View style={styles.chatIconPreviewRow}>
+                <Image
+                  source={{ uri: pendingIconPreviewUri }}
+                  style={styles.chatIconPreview}
+                />
+                <Text style={styles.chatIconPreviewLabel} numberOfLines={1}>
+                  {iconAttachBusy
+                    ? '썸네일 업로드 중…'
+                    : '완성 시 게임 썸네일로 저장됩니다'}
+                </Text>
+                <Pressable
+                  style={styles.chatIconRemove}
+                  disabled={isBusy || iconAttachBusy}
+                  onPress={() => {
+                    setPendingIconPreviewUri(null);
+                    setPendingIconStoragePath(null);
+                  }}
+                  accessibilityLabel="썸네일 제거"
+                >
+                  <Text style={styles.chatIconRemoveText}>×</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            <ChatPromptComposer
+              value={chatInput}
+              onChangeText={setChatInput}
+              onSend={() => void handleSendChat()}
+              onAttachImage={() => void handlePickGameIcon()}
+              attachDisabled={!authSession?.user?.id || isBusy}
+              attaching={iconAttachBusy}
+              placeholder="기획 AI에게 메시지 보내기…"
+              maxLength={MAX_CHAT_LENGTH}
+              editable={!!sessionId}
+              canSend={canSendChat}
+              sending={chatBusy}
+            />
+
+            <View style={styles.chatActionRow}>
               <Pressable
                 style={({ pressed }) => [
-                  styles.chatSendBtn,
-                  !canSendChat && styles.btnDisabled,
-                  pressed && canSendChat && styles.btnPressed,
+                  styles.chatResetBtn,
+                  isBusy && styles.btnDisabled,
+                  pressed && !isBusy && styles.btnPressed,
                 ]}
-                disabled={!canSendChat}
-                onPress={() => void handleSendChat()}
+                disabled={isBusy || !sessionId}
+                onPress={handleResetChat}
               >
-                <Text style={styles.chatSendBtnText}>전송</Text>
+                <Text style={styles.chatResetBtnText}>대화 초기화</Text>
               </Pressable>
-            </View>
 
-            <Pressable
-              style={({ pressed }) => [
-                styles.primaryBtn,
-                styles.chatBuildBtn,
-                !canBuild && styles.btnDisabled,
-                pressed && canBuild && styles.btnPressed,
-              ]}
-              disabled={!canBuild}
-              onPress={async () => {
-                if (!sessionId) return;
-                setBusy('generate');
-                setPlanningSummary(getPlanningSummary(chatMessages));
-                setPipeline((prev) =>
-                  upsertStep(prev, {
-                    id: 'client_request',
-                    label: '1. API 요청 (생성)',
-                    status: 'running',
-                    layer: 'client',
-                  }),
-                );
-                resetPreviewPipeline();
-                try {
-                  const preview = await generateGamePreview(undefined, sessionId);
-                  applyServerPipeline(preview.pipeline, '생성');
-                  setDraft(preview);
-                  setPreviewKey((k) => k + 1);
-                  setShowRevision(false);
-                  setRevisionPrompt('');
-                } catch (e) {
-                  const err = e instanceof ApiPipelineError ? e : null;
-                  failPipeline(
-                    '생성',
-                    e instanceof Error ? e.message : '생성 실패',
-                    err?.pipeline,
-                  );
-                  Alert.alert('오류', e instanceof Error ? e.message : '생성 실패');
-                } finally {
-                  setBusy(null);
-                }
-              }}
-            >
-              {busy === 'generate' ? (
-                <ActivityIndicator color="#0E0E0E" />
-              ) : (
-                <Text style={styles.primaryBtnText}>
-                  {readyToBuild ? '게임 만들기' : '게임 만들기 (기획 중…)'}
-                </Text>
-              )}
-            </Pressable>
+              {planningComplete ? (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.primaryBtn,
+                    styles.chatBuildBtn,
+                    !canBuild && styles.btnDisabled,
+                    pressed && canBuild && styles.btnPressed,
+                  ]}
+                  disabled={!canBuild}
+                  onPress={() => void runGenerateGame()}
+                >
+                  <Text style={styles.primaryBtnText}>게임 만들기</Text>
+                </Pressable>
+              ) : null}
+            </View>
 
             {__DEV__ ? (
               <>
@@ -481,177 +771,12 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
         </View>
       ) : (
         <View style={styles.previewMode}>
-          <View style={styles.previewToolbar}>
-            <Text style={styles.previewGameName} numberOfLines={1}>
-              {draft.name}
-            </Text>
-            <Text style={styles.previewScrollHint}>
-              아래로 스크롤하면 파이프라인 진단을 볼 수 있습니다
-            </Text>
-
-            <View style={styles.actionRow}>
-              <Pressable
-                style={({ pressed }) => [
-                  styles.secondaryBtn,
-                  isBusy && styles.btnDisabled,
-                  pressed && !isBusy && styles.btnPressed,
-                ]}
-                disabled={isBusy}
-                onPress={() => setShowRevision((v) => !v)}
-              >
-                <Text style={styles.secondaryBtnText}>수정</Text>
-              </Pressable>
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.primaryBtn,
-                  styles.toolbarPrimary,
-                  isBusy && styles.btnDisabled,
-                  pressed && !isBusy && styles.btnPressed,
-                ]}
-                disabled={isBusy}
-                onPress={async () => {
-                  setBusy('publish');
-                  setPipeline((prev) =>
-                    upsertStep(prev, {
-                      id: 'client_request',
-                      label: '1. API 요청 (완성)',
-                      status: 'running',
-                      layer: 'client',
-                    }),
-                  );
-                  try {
-                    if (!authSession?.access_token) {
-                      throw new ApiPipelineError('로그인이 필요합니다.');
-                    }
-                    const result = await publishGame({
-                      html: draft.html,
-                      name: draft.name,
-                      accessToken: authSession.access_token,
-                    });
-                    setPipeline((prev) =>
-                      mergeServerPipeline(
-                        upsertStep(prev, {
-                          id: 'client_request',
-                          label: '1. API 요청 (완성)',
-                          status: 'ok',
-                          layer: 'client',
-                        }),
-                        result.pipeline,
-                      ),
-                    );
-                    setDraft(null);
-                    setSessionId(null);
-                    setChatMessages([]);
-                    setChatInput('');
-                    setReadyToBuild(false);
-                    setPlanningSummary('');
-                    setRevisionPrompt('');
-                    setShowRevision(false);
-                    onGameCreated?.();
-                    Alert.alert(
-                      '완료',
-                      `저장됨 (id ${result.id}). Games 탭에서 확인하세요.`,
-                    );
-                  } catch (e) {
-                    const err = e instanceof ApiPipelineError ? e : null;
-                    failPipeline(
-                      '완성',
-                      e instanceof Error ? e.message : '저장 실패',
-                      err?.pipeline,
-                    );
-                    Alert.alert(
-                      '오류',
-                      e instanceof Error ? e.message : '저장 실패',
-                    );
-                  } finally {
-                    setBusy(null);
-                  }
-                }}
-              >
-                {busy === 'publish' ? (
-                  <ActivityIndicator color="#0E0E0E" />
-                ) : (
-                  <Text style={styles.primaryBtnText}>완성</Text>
-                )}
-              </Pressable>
-            </View>
-
-            {showRevision ? (
-              <View style={styles.revisionBlock}>
-                <TextInput
-                  style={styles.revisionInput}
-                  value={revisionPrompt}
-                  onChangeText={setRevisionPrompt}
-                  placeholder="수정할 내용 (예: 점프 높이 2배)"
-                  placeholderTextColor="rgba(255,255,255,0.35)"
-                  multiline
-                  editable={!isBusy}
-                />
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.revisionApplyBtn,
-                    (!revisionPrompt.trim() || isBusy) && styles.btnDisabled,
-                    pressed &&
-                      revisionPrompt.trim() &&
-                      !isBusy &&
-                      styles.btnPressed,
-                  ]}
-                  disabled={!revisionPrompt.trim() || isBusy}
-                  onPress={async () => {
-                    setBusy('revise');
-                    setPipeline((prev) =>
-                      upsertStep(prev, {
-                        id: 'client_request',
-                        label: '1. API 요청 (수정)',
-                        status: 'running',
-                        layer: 'client',
-                      }),
-                    );
-                    resetPreviewPipeline();
-                    try {
-                      const preview = await reviseGamePreview({
-                        js: getReviseSource(draft),
-                        revisionPrompt,
-                        originalPrompt: planningSummary || draft.metadata?.tagline,
-                      });
-                      applyServerPipeline(preview.pipeline, '수정');
-                      setDraft(preview);
-                      setPreviewKey((k) => k + 1);
-                      setRevisionPrompt('');
-                      setShowRevision(false);
-                    } catch (e) {
-                      const err = e instanceof ApiPipelineError ? e : null;
-                      failPipeline(
-                        '수정',
-                        e instanceof Error ? e.message : '수정 실패',
-                        err?.pipeline,
-                      );
-                      Alert.alert(
-                        '오류',
-                        e instanceof Error ? e.message : '수정 실패',
-                      );
-                    } finally {
-                      setBusy(null);
-                    }
-                  }}
-                >
-                  {busy === 'revise' ? (
-                    <ActivityIndicator color="#0E0E0E" size="small" />
-                  ) : (
-                    <Text style={styles.revisionApplyText}>수정 적용</Text>
-                  )}
-                </Pressable>
-              </View>
-            ) : null}
-          </View>
-
           <ScrollView
-            style={styles.previewScroll}
-            contentContainerStyle={styles.previewScrollContent}
+            style={styles.previewOuterScroll}
+            contentContainerStyle={styles.previewOuterScrollContent}
             keyboardShouldPersistTaps="handled"
-            nestedScrollEnabled
             showsVerticalScrollIndicator
+            nestedScrollEnabled
           >
             <View
               style={[
@@ -676,6 +801,129 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
               )}
             </View>
 
+            <Text style={styles.previewGameName} numberOfLines={1}>
+              {draft.name}
+            </Text>
+
+            <View style={styles.previewActions}>
+              <View style={styles.actionRow}>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.secondaryBtn,
+                    isBusy && styles.btnDisabled,
+                    pressed && !isBusy && styles.btnPressed,
+                  ]}
+                  disabled={isBusy}
+                  onPress={() => setShowRevision((v) => !v)}
+                >
+                  <Text style={styles.secondaryBtnText}>수정</Text>
+                </Pressable>
+
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.primaryBtn,
+                    styles.previewPrimaryBtn,
+                    (isBusy || iconUploadPending) && styles.btnDisabled,
+                    pressed && !isBusy && !iconUploadPending && styles.btnPressed,
+                  ]}
+                  disabled={isBusy || iconUploadPending}
+                  onPress={() => void handlePublish()}
+                >
+                  {busy === 'publish' ? (
+                    <ActivityIndicator color="#0E0E0E" />
+                  ) : (
+                    <Text style={styles.primaryBtnText}>완성</Text>
+                  )}
+                </Pressable>
+              </View>
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.deleteBtn,
+                  isBusy && styles.btnDisabled,
+                  pressed && !isBusy && styles.btnPressed,
+                ]}
+                disabled={isBusy}
+                onPress={handleDeleteDraft}
+              >
+                <Text style={styles.deleteBtnText}>삭제</Text>
+              </Pressable>
+
+              {showRevision ? (
+                <View style={styles.revisionBlock}>
+                  <TextInput
+                    style={styles.revisionInput}
+                    value={revisionPrompt}
+                    onChangeText={setRevisionPrompt}
+                    placeholder="수정할 내용 (예: 점프 높이 2배)"
+                    placeholderTextColor="rgba(255,255,255,0.35)"
+                    multiline
+                    editable={!isBusy}
+                  />
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.revisionApplyBtn,
+                      (!revisionPrompt.trim() || isBusy) && styles.btnDisabled,
+                      pressed &&
+                        revisionPrompt.trim() &&
+                        !isBusy &&
+                        styles.btnPressed,
+                    ]}
+                    disabled={!revisionPrompt.trim() || isBusy}
+                    onPress={async () => {
+                      setBusy('revise');
+                      setPipeline((prev) =>
+                        upsertStep(prev, {
+                          id: 'client_request',
+                          label: '1. API 요청 (수정)',
+                          status: 'running',
+                          layer: 'client',
+                        }),
+                      );
+                      resetPreviewPipeline();
+                      try {
+                        const preview = await reviseGamePreview({
+                          js: getReviseSource(draft),
+                          revisionPrompt,
+                          originalPrompt:
+                            planningSummary || draft.metadata?.tagline,
+                          sessionId: sessionId ?? undefined,
+                          chatHistory: chatMessages,
+                        });
+                        applyServerPipeline(preview.pipeline, '수정');
+                        setDraft((prev) => mergePreviewDraft(prev, preview));
+                        setPreviewKey((k) => k + 1);
+                        setRevisionPrompt('');
+                        setShowRevision(false);
+                      } catch (e) {
+                        const err = e instanceof ApiPipelineError ? e : null;
+                        failPipeline(
+                          '수정',
+                          e instanceof Error ? e.message : '수정 실패',
+                          err?.pipeline,
+                        );
+                        Alert.alert(
+                          '오류',
+                          e instanceof Error ? e.message : '수정 실패',
+                        );
+                      } finally {
+                        setBusy(null);
+                      }
+                    }}
+                  >
+                    {busy === 'revise' ? (
+                      <ActivityIndicator color="#0E0E0E" size="small" />
+                    ) : (
+                      <Text style={styles.revisionApplyText}>수정 적용</Text>
+                    )}
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+
+            <Text style={styles.previewScrollHint}>
+              아래로 스크롤하면 버튼·파이프라인 진단을 볼 수 있습니다
+            </Text>
             <View style={styles.pipelineSection}>
               <PipelinePanel
                 title="파이프라인 진단 (제작)"
@@ -686,12 +934,28 @@ export function CreatScreen({ onGameCreated }: CreatScreenProps) {
           </ScrollView>
         </View>
       )}
+
+      {buildLoaderVisible ? (
+        <Animated.View
+          style={[styles.buildLoaderOverlay, { opacity: buildLoaderOpacity }]}
+          pointerEvents="auto"
+        >
+          <GameBuildLoader />
+        </Animated.View>
+      ) : null}
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#0E0E0E' },
+  buildLoaderOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 100,
+    backgroundColor: '#0E0E0E',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   chatMode: {
     flex: 1,
     backgroundColor: '#0E0E0E',
@@ -708,7 +972,55 @@ const styles = StyleSheet.create({
     backgroundColor: '#0E0E0E',
     gap: 10,
   },
+  chatIconPreviewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 4,
+  },
+  chatIconPreview: {
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
+  chatIconPreviewLabel: {
+    flex: 1,
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.55)',
+  },
+  chatIconRemove: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatIconRemoveText: {
+    fontSize: 22,
+    lineHeight: 24,
+    color: 'rgba(255,255,255,0.5)',
+  },
+  chatActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  chatResetBtn: {
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.28)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatResetBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.85)',
+  },
   chatBuildBtn: {
+    flex: 1,
     marginTop: 0,
   },
   scroll: { flex: 1 },
@@ -789,34 +1101,6 @@ const styles = StyleSheet.create({
   chatBubbleTextUser: {
     color: '#0E0E0E',
   },
-  chatInputRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 8,
-  },
-  chatInput: {
-    flex: 1,
-    minHeight: 44,
-    maxHeight: 100,
-    borderWidth: 0,
-    borderRadius: 22,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    fontSize: 15,
-    color: '#FFFFFF',
-    backgroundColor: 'rgba(255,255,255,0.1)',
-  },
-  chatSendBtn: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 22,
-    backgroundColor: '#FFFFFF',
-  },
-  chatSendBtnText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#0E0E0E',
-  },
   apiHint: {
     fontSize: 11,
     color: 'rgba(255,255,255,0.35)',
@@ -856,10 +1140,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     alignItems: 'center',
   },
-  toolbarPrimary: {
-    flex: 1,
-    marginTop: 0,
-  },
   primaryBtnText: { fontSize: 16, fontWeight: '800', color: '#0E0E0E' },
   btnDisabled: { backgroundColor: 'rgba(255,255,255,0.22)' },
   btnPressed: { opacity: 0.9 },
@@ -867,33 +1147,51 @@ const styles = StyleSheet.create({
   previewMode: {
     flex: 1,
   },
-  previewToolbar: {
-    paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.1)',
-  },
   previewGameName: {
     fontSize: 13,
     color: 'rgba(255,255,255,0.55)',
-    marginBottom: 4,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 4,
+  },
+  previewActions: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 4,
+    gap: 8,
+  },
+  previewPrimaryBtn: {
+    flex: 1,
+    marginTop: 0,
   },
   previewScrollHint: {
     fontSize: 11,
     color: 'rgba(255,255,255,0.38)',
-    marginBottom: 10,
+    marginBottom: 4,
+    paddingHorizontal: 16,
+    paddingTop: 8,
   },
-  previewScroll: {
-    flex: 1,
+  deleteBtn: {
+    alignSelf: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
   },
-  previewScrollContent: {
-    paddingBottom: 32,
+  deleteBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,100,100,0.9)',
   },
   previewViewport: {
     width: '100%',
     overflow: 'hidden',
     backgroundColor: '#141414',
+  },
+  previewOuterScroll: {
+    flex: 1,
+    backgroundColor: '#0E0E0E',
+  },
+  previewOuterScrollContent: {
+    paddingBottom: 32,
   },
   previewLoading: {
     flex: 1,
@@ -922,7 +1220,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   secondaryBtnText: { fontSize: 16, fontWeight: '700', color: '#FFFFFF' },
-  revisionBlock: { marginTop: 10, gap: 8 },
+  revisionBlock: { marginTop: 4, gap: 8 },
   revisionInput: {
     minHeight: 56,
     maxHeight: 88,

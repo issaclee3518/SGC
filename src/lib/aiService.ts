@@ -13,6 +13,7 @@ export type GamePreview = {
   js: string;
   name: string;
   metadata?: GameMetadata;
+  assetBuildId?: string;
   pipeline?: PipelineTraceRecord[];
 };
 
@@ -20,7 +21,9 @@ export type PublishGameResult = {
   id: number;
   name: string;
   storage_path: string;
+  icon_storage_path?: string;
   playUrl: string;
+  iconUrl?: string;
   pipeline?: PipelineTraceRecord[];
 };
 
@@ -45,7 +48,7 @@ async function parseJsonResponse<T>(
   if (!text.trim()) {
     if (res.status === 0) {
       throw new ApiPipelineError(
-        `서버에 연결할 수 없습니다 (${apiBase}). SGS에서 npm run dev 실행 여부와 포트(5001)를 확인하세요.`,
+        `서버에 연결할 수 없습니다 (${apiBase}). EXPO_PUBLIC_API_URL과 Render/SGS 서버 상태를 확인하세요.`,
       );
     }
     throw new ApiPipelineError(
@@ -142,15 +145,69 @@ export async function createChatSession(): Promise<{
   return res.json() as Promise<{ sessionId: string; messages: ChatMessage[] }>;
 }
 
+export function isChatSessionNotFoundError(e: unknown): boolean {
+  return (
+    e instanceof ApiPipelineError &&
+    /session not found/i.test(e.message)
+  );
+}
+
 export async function sendChatMessage(
   sessionId: string,
   message: string,
+  options?: { hasGameThumbnail?: boolean },
 ): Promise<{
   reply: string;
   readyToBuild: boolean;
   messages: ChatMessage[];
 }> {
-  return postJson('/api/chat/sessions/' + sessionId + '/messages', { message });
+  return postJson('/api/chat/sessions/' + sessionId + '/messages', {
+    message,
+    hasGameThumbnail: options?.hasGameThumbnail === true,
+  });
+}
+
+/** 서버에 세션이 없으면(재시작·URL 변경) 새 세션 생성 후 메시지 재전송 */
+export async function sendChatMessageResilient(
+  sessionId: string,
+  message: string,
+  options?: { hasGameThumbnail?: boolean },
+): Promise<{
+  reply: string;
+  readyToBuild: boolean;
+  messages: ChatMessage[];
+  sessionId: string;
+  sessionRecreated: boolean;
+}> {
+  try {
+    const result = await sendChatMessage(sessionId, message, options);
+    return { ...result, sessionId, sessionRecreated: false };
+  } catch (e) {
+    if (!isChatSessionNotFoundError(e)) throw e;
+    const fresh = await createChatSession();
+    const result = await sendChatMessage(fresh.sessionId, message, options);
+    return {
+      ...result,
+      sessionId: fresh.sessionId,
+      sessionRecreated: true,
+    };
+  }
+}
+
+/** 서버에서 채팅 세션·대화 기록 삭제 */
+export async function deleteChatSession(sessionId: string): Promise<void> {
+  const apiBase = getApiBase();
+  const url = `${apiBase}/api/chat/sessions/${encodeURIComponent(sessionId)}`;
+  let res: Response;
+  try {
+    res = await fetch(url, { method: 'DELETE' });
+  } catch {
+    throw new ApiPipelineError(`서버 요청 실패 (${url})`);
+  }
+  if (!res.ok && res.status !== 204) {
+    const json = await parseJsonResponse<{ error?: string }>(res, apiBase);
+    throw new ApiPipelineError(json.error ?? '채팅 세션 삭제 실패');
+  }
 }
 
 /** 수정 프롬프트 → 새 미리보기 */
@@ -158,6 +215,8 @@ export async function reviseGamePreview(params: {
   js: string;
   revisionPrompt: string;
   originalPrompt?: string;
+  sessionId?: string;
+  chatHistory?: ChatMessage[];
 }): Promise<GamePreview> {
   return postJson<GamePreview>('/api/games/revise', params);
 }
@@ -167,6 +226,8 @@ export async function publishGame(params: {
   html: string;
   name: string;
   accessToken: string;
+  iconStoragePath?: string;
+  assetBuildId?: string;
 }): Promise<PublishGameResult> {
   const { accessToken, ...body } = params;
   return postJson<PublishGameResult>(

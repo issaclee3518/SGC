@@ -1,29 +1,43 @@
 import { StatusBar } from 'expo-status-bar';
 import React from 'react';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import {
-  ActivityIndicator,
+  SafeAreaProvider,
   SafeAreaView,
-  StyleSheet,
-  View,
-} from 'react-native';
+} from 'react-native-safe-area-context';
 import type { Game } from './src/component/GameCard';
 import { Navbar, type NavbarTab } from './src/component';
 import { AuthProvider, useAuth } from './src/context/AuthContext';
 import { fetchGames, fetchMyGames } from './src/lib/gameService';
-import { toggleGameLike } from './src/lib/likeService';
+import {
+  optimisticLikeToggle,
+  toggleGameLike,
+  type LikeMeta,
+} from './src/lib/likeService';
 import { CreatScreen } from './src/screens/CreatScreen';
 import { FeedScreen } from './src/screens/FeedScreen';
 import { LoginScreen } from './src/screens/LoginScreen';
 import { ProfileScreen } from './src/screens/ProfileScreen';
+
+function patchGameLike(
+  list: Game[],
+  gameId: string,
+  meta: LikeMeta,
+): Game[] {
+  return list.map((g) =>
+    g.id === gameId
+      ? { ...g, likeCount: meta.likeCount, likedByMe: meta.likedByMe }
+      : g,
+  );
+}
 
 function MainApp() {
   const { session, isLoading, isAuthenticated } = useAuth();
   const [active, setActive] = React.useState<NavbarTab>('games');
   const [games, setGames] = React.useState<Game[]>([]);
   const [myGames, setMyGames] = React.useState<Game[]>([]);
-  const [likeBusyGameId, setLikeBusyGameId] = React.useState<string | null>(
-    null,
-  );
+  const likeRequestSeq = React.useRef<Record<string, number>>({});
+  const likeInFlight = React.useRef<Set<string>>(new Set());
 
   const loadGames = React.useCallback(async () => {
     if (!session) return;
@@ -51,34 +65,59 @@ function MainApp() {
   }, [isAuthenticated, loadGames]);
 
   const handleToggleLike = React.useCallback(
-    async (gameId: string) => {
+    (gameId: string) => {
       if (!session?.user.id) return;
-      const game = games.find((g) => g.id === gameId);
-      if (!game || likeBusyGameId) return;
+      if (likeInFlight.current.has(gameId)) return;
 
-      setLikeBusyGameId(gameId);
-      try {
-        const next = await toggleGameLike(
-          Number(gameId),
-          session.user.id,
-          game.likedByMe ?? false,
-        );
-        setGames((prev) =>
-          prev.map((g) =>
-            g.id === gameId
-              ? { ...g, likeCount: next.likeCount, likedByMe: next.likedByMe }
-              : g,
-          ),
-        );
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : '좋아요 처리 실패';
-        console.error('toggle like:', message);
-      } finally {
-        setLikeBusyGameId(null);
+      likeInFlight.current.add(gameId);
+
+      let rollback: LikeMeta | undefined;
+      let found = false;
+
+      setGames((prev) => {
+        const game = prev.find((g) => g.id === gameId);
+        if (!game) return prev;
+        found = true;
+        const before: LikeMeta = {
+          likedByMe: game.likedByMe ?? false,
+          likeCount: game.likeCount ?? 0,
+        };
+        rollback = before;
+        const next = optimisticLikeToggle(before);
+        return patchGameLike(prev, gameId, next);
+      });
+
+      if (!found || !rollback) {
+        likeInFlight.current.delete(gameId);
+        return;
       }
+
+      const wasLiked = rollback.likedByMe;
+      const seq = (likeRequestSeq.current[gameId] ?? 0) + 1;
+      likeRequestSeq.current[gameId] = seq;
+
+      void (async () => {
+        try {
+          const server = await toggleGameLike(
+            Number(gameId),
+            session.user.id,
+            wasLiked,
+          );
+          if (likeRequestSeq.current[gameId] !== seq) return;
+          setGames((prev) => patchGameLike(prev, gameId, server));
+        } catch (error) {
+          if (likeRequestSeq.current[gameId] !== seq) return;
+          const revert = rollback;
+          setGames((prev) => patchGameLike(prev, gameId, revert));
+          const message =
+            error instanceof Error ? error.message : '좋아요 처리 실패';
+          console.error('toggle like:', message);
+        } finally {
+          likeInFlight.current.delete(gameId);
+        }
+      })();
     },
-    [games, likeBusyGameId, session],
+    [session],
   );
 
   if (isLoading) {
@@ -98,21 +137,27 @@ function MainApp() {
   return (
     <>
       <View style={styles.content}>
-        {active === 'games' ? (
+        <View
+          style={[styles.tabPane, active !== 'games' && styles.tabHidden]}
+          pointerEvents={active === 'games' ? 'auto' : 'none'}
+        >
           <FeedScreen
             games={games}
-            onToggleLike={(id) => void handleToggleLike(id)}
-            likeBusyGameId={likeBusyGameId}
+            onToggleLike={handleToggleLike}
           />
-        ) : active === 'create' ? (
+        </View>
+        <View
+          style={[styles.tabPane, active !== 'create' && styles.tabHidden]}
+          pointerEvents={active === 'create' ? 'auto' : 'none'}
+        >
           <CreatScreen onGameCreated={loadGames} />
-        ) : (
-          <ProfileScreen
-            games={myGames}
-            onRefresh={loadGames}
-            user={user}
-          />
-        )}
+        </View>
+        <View
+          style={[styles.tabPane, active !== 'profile' && styles.tabHidden]}
+          pointerEvents={active === 'profile' ? 'auto' : 'none'}
+        >
+          <ProfileScreen key="profile" games={myGames} user={user} />
+        </View>
       </View>
 
       <Navbar
@@ -127,12 +172,14 @@ function MainApp() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <SafeAreaView style={styles.safe}>
-        <MainApp />
-        <StatusBar style="light" />
-      </SafeAreaView>
-    </AuthProvider>
+    <SafeAreaProvider>
+      <AuthProvider>
+        <SafeAreaView style={styles.safe}>
+          <MainApp />
+          <StatusBar style="light" />
+        </SafeAreaView>
+      </AuthProvider>
+    </SafeAreaProvider>
   );
 }
 
@@ -147,5 +194,14 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     backgroundColor: '#0E0E0E',
+  },
+  tabPane: {
+    ...StyleSheet.absoluteFillObject,
+    flex: 1,
+    backgroundColor: '#0E0E0E',
+  },
+  tabHidden: {
+    opacity: 0,
+    zIndex: -1,
   },
 });

@@ -1,7 +1,12 @@
 import type { Session } from '@supabase/supabase-js';
 import React from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
-import { getSession, onAuthStateChange } from '../lib/authService';
+import {
+  clearStaleAuthSession,
+  getSession,
+  isInvalidRefreshTokenError,
+  onAuthStateChange,
+} from '../lib/authService';
 import { supabase } from '../lib/supabase';
 
 type AuthContextValue = {
@@ -23,6 +28,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     getSession()
       .then((s) => {
         if (mounted) setSession(s);
+        if (s) supabase.auth.startAutoRefresh();
+      })
+      .catch(async (e) => {
+        if (isInvalidRefreshTokenError(e)) {
+          await clearStaleAuthSession();
+        } else {
+          console.warn('[auth] getSession failed:', e);
+        }
+        if (mounted) setSession(null);
       })
       .finally(() => {
         if (mounted) setIsLoading(false);
@@ -34,7 +48,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
       if (state === 'active') {
-        supabase.auth.startAutoRefresh();
+        void getSession()
+          .then((s) => {
+            if (mounted) setSession(s);
+            if (s) supabase.auth.startAutoRefresh();
+            else supabase.auth.stopAutoRefresh();
+          })
+          .catch(async (e) => {
+            if (isInvalidRefreshTokenError(e)) {
+              await clearStaleAuthSession();
+              if (mounted) setSession(null);
+            }
+            supabase.auth.stopAutoRefresh();
+          });
       } else {
         supabase.auth.stopAutoRefresh();
       }

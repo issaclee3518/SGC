@@ -7,14 +7,16 @@ import {
   type PipelineStep,
 } from '../lib/pipeline';
 import { PipelinePanel } from './PipelinePanel';
+import { GameLeaderboardPanel } from './GameLeaderboardPanel';
 import { GameLikeButton } from './GameLikeButton';
+import { submitLeaderboardScore } from '../lib/leaderboardService';
 
 export type Game = {
   id: string;
   title: string;
-  description?: string;
   playUrl: string;
   storageBaseUrl: string;
+  iconUrl?: string;
   likeCount?: number;
   likedByMe?: boolean;
 };
@@ -23,14 +25,29 @@ type GameCardProps = {
   game: Game;
   height: number;
   showPipeline?: boolean;
+  showLeaderboard?: boolean;
   onToggleLike?: (gameId: string) => void;
-  likeBusy?: boolean;
 };
 
 function isHtmlDocument(content: string): boolean {
   const t = content.trim().toLowerCase();
   return t.startsWith('<!doctype') || t.startsWith('<html');
 }
+
+const SCORE_BRIDGE_SCRIPT = `
+(function() {
+  if (window.__scoreBridgeInstalled) return;
+  window.__scoreBridgeInstalled = true;
+  window.reportGameScore = function(score) {
+    var n = Number(score);
+    if (!isFinite(n) || n < 0) return;
+    if (window.ReactNativeWebView) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'game_score', score: n }));
+    }
+  };
+})();
+true;
+`;
 
 const RUNTIME_CHECK_SCRIPT = `
 setTimeout(function() {
@@ -57,8 +74,8 @@ export function GameCard({
   game,
   height,
   showPipeline = true,
+  showLeaderboard = false,
   onToggleLike,
-  likeBusy = false,
 }: GameCardProps) {
   const [html, setHtml] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -71,6 +88,9 @@ export function GameCard({
   const setStep = React.useCallback((patch: PipelineStep) => {
     setPipelineSteps((prev) => upsertStep(prev, patch));
   }, []);
+
+  const bestSubmittedScore = React.useRef(-1);
+  const [leaderboardTick, setLeaderboardTick] = React.useState(0);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -221,8 +241,28 @@ export function GameCard({
                 const data = JSON.parse(ev.nativeEvent.data) as {
                   type?: string;
                   message?: string;
+                  score?: number;
                 };
-                if (data.type === 'game_error') {
+                if (
+                  showLeaderboard &&
+                  data.type === 'game_score' &&
+                  typeof data.score === 'number' &&
+                  Number.isFinite(data.score)
+                ) {
+                  const score = Math.max(0, data.score);
+                  if (score > bestSubmittedScore.current) {
+                    bestSubmittedScore.current = score;
+                    const gameId = Number(game.id);
+                    if (Number.isFinite(gameId)) {
+                      void submitLeaderboardScore(gameId, score)
+                        .then(() => setLeaderboardTick((t) => t + 1))
+                        .catch((err) => {
+                          console.warn('leaderboard score:', err);
+                          bestSubmittedScore.current = -1;
+                        });
+                    }
+                  }
+                } else if (data.type === 'game_error') {
                   setError(true);
                   setErrorDetail(data.message ?? '게임 JS 오류');
                   setStep({
@@ -245,7 +285,7 @@ export function GameCard({
                 /* ignore */
               }
             }}
-            injectedJavaScript={RUNTIME_CHECK_SCRIPT}
+            injectedJavaScript={SCORE_BRIDGE_SCRIPT + RUNTIME_CHECK_SCRIPT}
           />
         ) : null}
 
@@ -265,14 +305,21 @@ export function GameCard({
           </View>
         )}
 
-        {onToggleLike ? (
-          <View style={styles.likeAnchor} pointerEvents="box-none">
-            <GameLikeButton
-              likeCount={game.likeCount ?? 0}
-              likedByMe={game.likedByMe ?? false}
-              disabled={likeBusy}
-              onPress={() => onToggleLike(game.id)}
-            />
+        {showLeaderboard || onToggleLike ? (
+          <View style={styles.actionsAnchor} pointerEvents="box-none">
+            {showLeaderboard ? (
+              <GameLeaderboardPanel
+                gameId={game.id}
+                refreshTick={leaderboardTick}
+              />
+            ) : null}
+            {onToggleLike ? (
+              <GameLikeButton
+                likeCount={game.likeCount ?? 0}
+                likedByMe={game.likedByMe ?? false}
+                onPress={() => onToggleLike(game.id)}
+              />
+            ) : null}
           </View>
         ) : null}
       </View>
@@ -284,7 +331,7 @@ const styles = StyleSheet.create({
   root: {
     width: '100%',
     backgroundColor: '#0E0E0E',
-    overflow: 'hidden',
+    overflow: 'visible',
   },
   pipelineWrap: {
     paddingHorizontal: 12,
@@ -293,7 +340,7 @@ const styles = StyleSheet.create({
   },
   webWrap: {
     width: '100%',
-    overflow: 'hidden',
+    overflow: 'visible',
   },
   webview: {
     flex: 1,
@@ -322,10 +369,13 @@ const styles = StyleSheet.create({
     fontSize: 13,
     textAlign: 'center',
   },
-  likeAnchor: {
+  actionsAnchor: {
     position: 'absolute',
     right: 16,
     bottom: 16,
-    zIndex: 10,
+    zIndex: 20,
+    alignItems: 'center',
+    gap: 10,
+    overflow: 'visible',
   },
 });

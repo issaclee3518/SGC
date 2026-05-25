@@ -8,6 +8,7 @@ type GameRow = {
   id: number;
   name: string;
   storage_path: string | null;
+  icon_storage_path: string | null;
   user_id: string | null;
 };
 
@@ -28,6 +29,9 @@ function mapRows(rows: GameRow[]): Game[] {
       title: row.name,
       playUrl: getGamePublicUrl(row.storage_path!),
       storageBaseUrl,
+      iconUrl: row.icon_storage_path
+        ? getGamePublicUrl(row.icon_storage_path)
+        : undefined,
     }));
 }
 
@@ -48,7 +52,7 @@ async function attachLikes(games: Game[], userId: string): Promise<Game[]> {
 export async function fetchGames(userId: string): Promise<Game[]> {
   const { data, error } = await supabase
     .from('games')
-    .select('id, name, storage_path, user_id')
+    .select('id, name, storage_path, icon_storage_path, user_id')
     .order('id', { ascending: false });
 
   if (error) throw new Error(error.message);
@@ -61,7 +65,7 @@ export async function fetchGames(userId: string): Promise<Game[]> {
 export async function fetchMyGames(userId: string): Promise<Game[]> {
   const { data, error } = await supabase
     .from('games')
-    .select('id, name, storage_path, user_id')
+    .select('id, name, storage_path, icon_storage_path, user_id')
     .eq('user_id', userId)
     .order('id', { ascending: false });
 

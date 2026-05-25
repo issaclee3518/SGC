@@ -1,0 +1,3 @@
+-- In-game sprites (LangGraph image gen → Storage URL in bundled games)
+-- Paths: assets/preview/{buildId}/*.webp|png  →  assets/{gameId}/* on publish
+-- games bucket MIME types must include image/jpeg, image/png, image/webp (see setup-game-icons.sql)

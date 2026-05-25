@@ -20,10 +20,38 @@ import { useAuth } from '../context/AuthContext';
 type ProfileScreenProps = {
   games: Game[];
   user: User;
-  onRefresh?: () => void;
 };
 
-export function ProfileScreen({ games, user, onRefresh }: ProfileScreenProps) {
+function GameRow({ game }: { game: Game }) {
+  const [iconFailed, setIconFailed] = React.useState(false);
+  const showIcon = !!game.iconUrl && !iconFailed;
+
+  React.useEffect(() => {
+    setIconFailed(false);
+  }, [game.iconUrl]);
+
+  return (
+    <View style={styles.gameRow}>
+      {showIcon ? (
+        <Image
+          source={{ uri: game.iconUrl }}
+          style={styles.gameThumbImage}
+          resizeMode="cover"
+          onError={() => setIconFailed(true)}
+        />
+      ) : (
+        <View style={styles.gameThumb} />
+      )}
+      <View style={styles.gameInfo}>
+        <Text style={styles.gameTitle} numberOfLines={1}>
+          {game.title}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+export function ProfileScreen({ games, user }: ProfileScreenProps) {
   const { setSession } = useAuth();
   const displayName = displayNameFromUser(user);
   const avatarUrl = avatarUrlFromUser(user);
@@ -73,31 +101,12 @@ export function ProfileScreen({ games, user, onRefresh }: ProfileScreenProps) {
         <Text style={styles.signOutBtnText}>로그아웃</Text>
       </Pressable>
 
-      {onRefresh ? (
-        <Pressable
-          style={({ pressed }) => [styles.refreshBtn, pressed && styles.pressed]}
-          onPress={onRefresh}
-        >
-          <Text style={styles.refreshBtnText}>목록 새로고침</Text>
-        </Pressable>
-      ) : null}
-
       <Text style={styles.sectionTitle}>만든 게임</Text>
       {games.length === 0 ? (
         <Text style={styles.empty}>아직 완성한 게임이 없습니다.</Text>
       ) : (
         games.map((game) => (
-          <View key={game.id} style={styles.gameRow}>
-            <View style={styles.gameThumb} />
-            <View style={styles.gameInfo}>
-              <Text style={styles.gameTitle} numberOfLines={1}>
-                {game.title}
-              </Text>
-              <Text style={styles.gameMeta} numberOfLines={1}>
-                id {game.id}
-              </Text>
-            </View>
-          </View>
+          <GameRow key={game.id} game={game} />
         ))
       )}
     </ScrollView>
@@ -176,20 +185,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#FFFFFF',
   },
-  refreshBtn: {
-    alignSelf: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.25)',
-    marginBottom: 24,
-  },
-  refreshBtnText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#FFFFFF',
-  },
   pressed: { opacity: 0.85 },
   sectionTitle: {
     fontSize: 16,
@@ -215,15 +210,16 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: 'rgba(255,255,255,0.08)',
   },
+  gameThumbImage: {
+    width: 48,
+    height: 48,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+  },
   gameInfo: { flex: 1 },
   gameTitle: {
     fontSize: 15,
     fontWeight: '600',
     color: '#FFFFFF',
-  },
-  gameMeta: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.4)',
-    marginTop: 2,
   },
 });

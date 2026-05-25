@@ -63,15 +63,50 @@ export async function signInWithGoogle(): Promise<Session> {
   return sessionData.session;
 }
 
-export async function signOut(): Promise<void> {
-  const { error } = await supabase.auth.signOut();
-  if (error) throw error;
+export function isInvalidRefreshTokenError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const msg = String((error as { message?: string }).message ?? '').toLowerCase();
+  const code = String((error as { code?: string }).code ?? '').toLowerCase();
+  return (
+    code.includes('refresh') ||
+    msg.includes('refresh token') ||
+    msg.includes('invalid refresh')
+  );
 }
 
+/** AsyncStorage에 남은 만료/삭제된 refresh token 제거 */
+export async function clearStaleAuthSession(): Promise<void> {
+  try {
+    await supabase.auth.signOut({ scope: 'local' });
+  } catch {
+    /* 이미 로컬 세션이 없을 수 있음 */
+  }
+}
+
+export async function signOut(): Promise<void> {
+  const { error } = await supabase.auth.signOut();
+  if (error && !isInvalidRefreshTokenError(error)) throw error;
+}
+
+/** 만료된 refresh token이면 로컬 세션만 지우고 null (LogBox 오류 방지) */
 export async function getSession(): Promise<Session | null> {
-  const { data, error } = await supabase.auth.getSession();
-  if (error) throw error;
-  return data.session;
+  try {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+      if (isInvalidRefreshTokenError(error)) {
+        await clearStaleAuthSession();
+        return null;
+      }
+      throw error;
+    }
+    return data.session;
+  } catch (e) {
+    if (isInvalidRefreshTokenError(e)) {
+      await clearStaleAuthSession();
+      return null;
+    }
+    throw e;
+  }
 }
 
 export function onAuthStateChange(

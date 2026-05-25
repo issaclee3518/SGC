@@ -5,6 +5,38 @@ export type LikeMeta = {
   likedByMe: boolean;
 };
 
+/** 탭 직후 UI에 반영할 낙관적 좋아요 상태 */
+export function optimisticLikeToggle(current: LikeMeta): LikeMeta {
+  const likedByMe = !current.likedByMe;
+  return {
+    likedByMe,
+    likeCount: Math.max(0, current.likeCount + (likedByMe ? 1 : -1)),
+  };
+}
+
+function isDuplicateKeyError(message: string): boolean {
+  return /duplicate key|unique constraint|game_likes_pkey/i.test(message);
+}
+
+async function fetchLikeCount(gameId: number): Promise<number> {
+  const { data, error } = await supabase
+    .from('game_like_counts')
+    .select('like_count')
+    .eq('game_id', gameId)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message);
+  return data?.like_count ?? 0;
+}
+
+export async function fetchLikeMetaForGame(
+  gameId: number,
+  userId: string,
+): Promise<LikeMeta> {
+  const map = await fetchLikeMetaForGames([gameId], userId);
+  return map.get(gameId) ?? { likeCount: 0, likedByMe: false };
+}
+
 export async function fetchLikeMetaForGames(
   gameIds: number[],
   userId: string,
@@ -54,23 +86,26 @@ export async function toggleGameLike(
       .eq('game_id', gameId)
       .eq('user_id', userId);
     if (error) throw new Error(error.message);
-  } else {
-    const { error } = await supabase
-      .from('game_likes')
-      .insert({ game_id: gameId, user_id: userId });
-    if (error) throw new Error(error.message);
+
+    return {
+      likeCount: await fetchLikeCount(gameId),
+      likedByMe: false,
+    };
   }
 
-  const { data, error } = await supabase
-    .from('game_like_counts')
-    .select('like_count')
-    .eq('game_id', gameId)
-    .maybeSingle();
+  const { error } = await supabase
+    .from('game_likes')
+    .insert({ game_id: gameId, user_id: userId });
 
-  if (error) throw new Error(error.message);
+  if (error) {
+    if (isDuplicateKeyError(error.message)) {
+      return fetchLikeMetaForGame(gameId, userId);
+    }
+    throw new Error(error.message);
+  }
 
   return {
-    likeCount: data?.like_count ?? 0,
-    likedByMe: !currentlyLiked,
+    likeCount: await fetchLikeCount(gameId),
+    likedByMe: true,
   };
 }

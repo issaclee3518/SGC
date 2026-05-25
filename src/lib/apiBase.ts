@@ -1,6 +1,6 @@
 import Constants from 'expo-constants';
 
-/** SGS 기본 포트 (macOS AirPlay가 5000 사용 → 5001) */
+/** SGS 기본 포트 — __DEV__ 에서 EXPO_PUBLIC_API_URL 미설정 시 로컬 SGS용 */
 export const SGS_PORT = 5001;
 
 function resolveExpoDevHost(): string | null {
@@ -21,7 +21,7 @@ function resolveExpoDevHost(): string | null {
   return null;
 }
 
-/** SGC → SGS API 베이스 URL */
+/** SGC → SGS API 베이스 URL (EXPO_PUBLIC_API_URL 우선) */
 export function getApiBase(): string {
   const fromEnv = process.env.EXPO_PUBLIC_API_URL?.trim().replace(/\/$/, '');
   if (fromEnv) return fromEnv;
@@ -31,7 +31,10 @@ export function getApiBase(): string {
     if (devHost) {
       return `http://${devHost}:${SGS_PORT}`;
     }
+    return `http://127.0.0.1:${SGS_PORT}`;
   }
 
-  return `http://127.0.0.1:${SGS_PORT}`;
+  throw new Error(
+    'EXPO_PUBLIC_API_URL is not set. Add it to .env.local (e.g. https://sgs-gl6p.onrender.com)',
+  );
 }
